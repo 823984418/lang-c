@@ -13,16 +13,16 @@
 #![allow(ellipsis_inclusive_range_patterns)]
 
 pub mod ast;
+pub mod astutil;
 pub mod driver;
+pub mod env;
 pub mod loc;
+pub mod parser;
 pub mod print;
 pub mod span;
+pub mod strings;
 pub mod visit;
 
-mod astutil;
-mod env;
-mod parser;
-mod strings;
 
 #[cfg(test)]
 mod tests;
