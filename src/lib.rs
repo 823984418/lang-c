@@ -11,6 +11,9 @@
 
 #![allow(deprecated)]
 #![allow(ellipsis_inclusive_range_patterns)]
+extern crate bindgen;
+extern crate cexpr;
+extern crate regex;
 
 pub mod ast;
 pub mod astutil;
@@ -22,6 +25,8 @@ pub mod print;
 pub mod span;
 pub mod strings;
 pub mod visit;
+
+pub mod hack_bindgen;
 
 
 #[cfg(test)]
