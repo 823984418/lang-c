@@ -17,18 +17,56 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt::Write;
+use std::fmt::{Debug, Formatter, Write};
 use std::rc::Rc;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct HackBindgenContext {
     macro_define: HashMap<String, MacroItem>,
+    inline_fn:
+        HashMap<String, Box<dyn Fn(&[RustExpression], &HackBindgenContext) -> RustExpression>>,
+}
+
+impl Debug for HackBindgenContext {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HackBindgenContext")
+            .field("macro_define", &self.macro_define)
+            .finish()
+    }
+}
+
+impl HackBindgenContext {
+    pub fn define_inline_fn<
+        F: Fn(&[RustExpression], &HackBindgenContext) -> RustExpression + 'static,
+    >(
+        &mut self,
+        name: &str,
+        inline_fn: F,
+    ) {
+        self.inline_fn.insert(name.to_string(), Box::new(inline_fn));
+    }
+
+    pub fn define_inline_fn_type(&mut self, name: &str, ty: RustType) {
+        let name_str = name.to_string();
+        self.define_inline_fn(name, move |args, ctx| {
+            let args = args
+                .iter()
+                .map(|i| i.expression.clone())
+                .collect::<Vec<_>>();
+            RustExpression {
+                type_info: Some(ty.clone()),
+                expression: format!("{}({})", name_str, args.join(", ")),
+            }
+        });
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct RustType {
     type_name: String,
     is_array: bool,
+
+    // 这些修饰符用于生成过程，并不作用于最终结果
     has_const: bool,
     has_signed: bool,
     has_unsigned: bool,
@@ -37,6 +75,13 @@ pub struct RustType {
 impl RustType {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        Self {
+            type_name: name.to_string(),
+            ..Self::new()
+        }
     }
 
     pub fn from_integer_suffix(suffix: &IntegerSuffix) -> Self {
@@ -286,10 +331,7 @@ impl RustExpression {
                     type_info = Some(ty);
                 }
                 Constant::Character(v) => {
-                    let ty = RustType {
-                        type_name: "core::ffi::c_char".to_string(),
-                        ..RustType::new()
-                    };
+                    let ty = RustType::from_name("core::ffi::c_char");
                     expression = format!("{} as {}", v, ty.type_name);
                     type_info = Some(ty);
                 }
@@ -327,19 +369,26 @@ impl RustExpression {
                 }
             },
             Expression::Call(v) => {
-                let callee = if let Expression::Identifier(f) = &v.node.callee.node {
-                    f.node.name.clone()
-                } else {
-                    RustExpression::from_node(&v.node.callee, ctx).expression
-                };
                 let args = v
                     .node
                     .arguments
                     .iter()
-                    .map(|i| RustExpression::from_node(i, ctx).expression)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                expression = format!("{}({})", callee, args);
+                    .map(|i| RustExpression::from_node(i, ctx))
+                    .collect::<Vec<_>>();
+                if let Expression::Identifier(f) = &v.node.callee.node {
+                    if let Some(inline_fn) = ctx.inline_fn.get(&f.node.name) {
+                        let r = inline_fn(&args, ctx);
+                        expression = r.expression;
+                        type_info = r.type_info;
+                    } else {
+                        let args = args.into_iter().map(|i| i.expression).collect::<Vec<_>>();
+                        expression = format!("{}({})", f.node.name, args.join(", "));
+                    }
+                } else {
+                    let callee = RustExpression::from_node(&v.node.callee, ctx).expression;
+                    let args = args.into_iter().map(|i| i.expression).collect::<Vec<_>>();
+                    expression = format!("({})({})", callee, args.join(", "));
+                };
             }
             Expression::CompoundLiteral(v) => {
                 let ty = RustType::from_type_name(&v.node.type_name, ctx);
@@ -426,18 +475,12 @@ impl RustExpression {
             Expression::SizeOfTy(v) => {
                 let par_ty = RustType::from_type_name(&v.node.0, ctx);
                 expression = format!("size_of::<{}>()", par_ty.type_name);
-                type_info = Some(RustType {
-                    type_name: "usize".to_string(),
-                    ..RustType::new()
-                });
+                type_info = Some(RustType::from_name("usize"));
             }
             Expression::AlignOf(v) => {
                 let par_ty = RustType::from_type_name(&v.node.0, ctx);
                 expression = format!("align_of::<{}>()", par_ty.type_name);
-                type_info = Some(RustType {
-                    type_name: "usize".to_string(),
-                    ..RustType::new()
-                });
+                type_info = Some(RustType::from_name("usize"));
             }
             Expression::UnaryOperator(v) => {
                 let ops = RustExpression::from_node(&v.node.operand, ctx);
@@ -484,10 +527,7 @@ impl RustExpression {
                     }
                     UnaryOperator::Negate => {
                         expression = format!("(({}) == 0) as core::ffi::c_int", ops.expression);
-                        type_info = Some(RustType {
-                            type_name: "bool".to_string(),
-                            ..RustType::new()
-                        });
+                        type_info = Some(RustType::from_name("bool"));
                     }
                 }
             }
@@ -545,60 +585,42 @@ impl RustExpression {
                             "(({}) < ({})) as core::ffi::c_int",
                             lhs.expression, rhs.expression
                         );
-                        type_info = Some(RustType {
-                            type_name: "core::ffi::c_int".to_string(),
-                            ..RustType::new()
-                        });
+                        type_info = Some(RustType::from_name("core::ffi::c_int"));
                     }
                     BinaryOperator::Greater => {
                         expression = format!(
                             "(({}) > ({})) as core::ffi::c_int",
                             lhs.expression, rhs.expression
                         );
-                        type_info = Some(RustType {
-                            type_name: "core::ffi::c_int".to_string(),
-                            ..RustType::new()
-                        });
+                        type_info = Some(RustType::from_name("core::ffi::c_int"));
                     }
                     BinaryOperator::LessOrEqual => {
                         expression = format!(
                             "(({}) <= ({})) as core::ffi::c_int",
                             lhs.expression, rhs.expression
                         );
-                        type_info = Some(RustType {
-                            type_name: "core::ffi::c_int".to_string(),
-                            ..RustType::new()
-                        });
+                        type_info = Some(RustType::from_name("core::ffi::c_int"));
                     }
                     BinaryOperator::GreaterOrEqual => {
                         expression = format!(
                             "(({}) >= ({})) as core::ffi::c_int",
                             lhs.expression, rhs.expression
                         );
-                        type_info = Some(RustType {
-                            type_name: "core::ffi::c_int".to_string(),
-                            ..RustType::new()
-                        });
+                        type_info = Some(RustType::from_name("core::ffi::c_int"));
                     }
                     BinaryOperator::Equals => {
                         expression = format!(
                             "(({}) == ({})) as core::ffi::c_int",
                             lhs.expression, rhs.expression
                         );
-                        type_info = Some(RustType {
-                            type_name: "core::ffi::c_int".to_string(),
-                            ..RustType::new()
-                        });
+                        type_info = Some(RustType::from_name("core::ffi::c_int"));
                     }
                     BinaryOperator::NotEquals => {
                         expression = format!(
                             "(({}) != ({})) as core::ffi::c_int",
                             lhs.expression, rhs.expression
                         );
-                        type_info = Some(RustType {
-                            type_name: "core::ffi::c_int".to_string(),
-                            ..RustType::new()
-                        });
+                        type_info = Some(RustType::from_name("core::ffi::c_int"));
                     }
                     BinaryOperator::BitwiseAnd => {
                         expression = format!("(({}) & ({}))", lhs.expression, rhs.expression);
@@ -617,20 +639,14 @@ impl RustExpression {
                             "((({}) as bool) && (({}) as bool)) as core::ffi::c_int",
                             lhs.expression, rhs.expression
                         );
-                        type_info = Some(RustType {
-                            type_name: "core::ffi::c_int".to_string(),
-                            ..RustType::new()
-                        });
+                        type_info = Some(RustType::from_name("core::ffi::c_int"));
                     }
                     BinaryOperator::LogicalOr => {
                         expression = format!(
                             "((({}) as bool) || (({}) as bool)) as core::ffi::c_int",
                             lhs.expression, rhs.expression
                         );
-                        type_info = Some(RustType {
-                            type_name: "core::ffi::c_int".to_string(),
-                            ..RustType::new()
-                        });
+                        type_info = Some(RustType::from_name("core::ffi::c_int"));
                     }
                     BinaryOperator::Assign => {
                         expression = format!(
@@ -765,8 +781,8 @@ pub enum MacroItem {
 pub struct HackBindgenCallbacks(Rc<RefCell<HackBindgenContext>>);
 
 impl HackBindgenCallbacks {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(ctx: HackBindgenContext) -> Self {
+        Self(Rc::new(RefCell::new(ctx)))
     }
 
     pub fn define(&self, name: &str, tokens: &[Token]) -> bool {
@@ -836,8 +852,7 @@ impl HackBindgenCallbacks {
         *code = result;
     }
 
-    pub fn generate(mut b: bindgen::Builder) -> Result<String, Box<dyn Error>> {
-        let this = Self::new();
+    pub fn generate(&self, mut b: bindgen::Builder) -> Result<String, Box<dyn Error>> {
         b = b.raw_line("pub type uint8_t = u8;");
         b = b.raw_line("pub type int8_t = i8;");
         b = b.raw_line("pub type uint16_t = u16;");
@@ -848,12 +863,12 @@ impl HackBindgenCallbacks {
         b = b.raw_line("pub type int64_t = i64;");
         b = b.raw_line("pub type uint128_t = u128;");
         b = b.raw_line("pub type int128_t = i128;");
-        b = b.parse_callbacks(Box::new(this.clone()));
+        b = b.parse_callbacks(Box::new(self.clone()));
         let bindings = b.generate()?;
         let mut code = Vec::<u8>::new();
         bindings.write(Box::new(&mut code as &mut dyn std::io::Write))?;
         let mut code = String::from_utf8_lossy(&code).into_owned();
-        this.post_processing(&mut code);
+        self.post_processing(&mut code);
         Ok(code)
     }
 }
@@ -893,6 +908,12 @@ fn a() {
 
     bindgen = bindgen.header("test.h");
 
-    let s = HackBindgenCallbacks::generate(bindgen).unwrap();
+    bindgen =
+        bindgen.raw_line("pub const fn BIT(n: core::ffi::c_int) -> core::ffi::c_int { 1 << n }");
+
+    let mut ctx = HackBindgenContext::default();
+    ctx.define_inline_fn_type("BIT", RustType::from_name("core::ffi::c_int"));
+    let callback = HackBindgenCallbacks::new(ctx);
+    let s = callback.generate(bindgen).unwrap();
     println!("{}", s);
 }

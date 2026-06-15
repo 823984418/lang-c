@@ -1,3 +1,3 @@
 #define A (int)(S + B)
 
-#define B int
+#define B BIT(1)
