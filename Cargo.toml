@@ -1,5 +1,6 @@
 [package]
 name = "lang-c"
+edition = "2015"
 version = "0.15.1"
 authors = ["Vickenty Fesunov <kent@setattr.net>"]
 license = "MIT/Apache-2.0"

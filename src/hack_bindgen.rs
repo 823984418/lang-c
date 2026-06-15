@@ -36,6 +36,10 @@ impl Debug for HackBindgenContext {
 }
 
 impl HackBindgenContext {
+    pub fn define_macro(&mut self, name: &str, macro_item: MacroItem) {
+        self.macro_define.insert(name.to_string(), macro_item);
+    }
+
     pub fn define_inline_fn<
         F: Fn(&[RustExpression], &HackBindgenContext) -> RustExpression + 'static,
     >(
@@ -786,6 +790,9 @@ impl HackBindgenCallbacks {
     }
 
     pub fn define(&self, name: &str, tokens: &[Token]) -> bool {
+        if self.0.borrow().macro_define.contains_key(name) {
+            return true;
+        }
         let code = tokens
             .iter()
             .skip(1)
@@ -799,15 +806,13 @@ impl HackBindgenCallbacks {
                 let expr = RustExpression::from_node(&v, &self.0.borrow());
                 self.0
                     .borrow_mut()
-                    .macro_define
-                    .insert(name.to_string(), MacroItem::Expression(expr));
+                    .define_macro(name, MacroItem::Expression(expr));
                 return true;
             } else if let Ok(v) = type_name(&code, &mut env_type) {
                 let expr = RustType::from_type_name(&v, &self.0.borrow());
                 self.0
                     .borrow_mut()
-                    .macro_define
-                    .insert(name.to_string(), MacroItem::TypeName(expr));
+                    .define_macro(name, MacroItem::TypeName(expr));
                 return true;
             }
         }
