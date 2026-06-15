@@ -315,7 +315,7 @@ impl RustExpression {
                 }
                 MemberOperator::Indirect => {
                     let exp = RustExpression::from_node(&v.node.expression);
-                    expression = format!("({})->{}", exp.expression, v.node.identifier.node.name);
+                    expression = format!("(*({})).{}", exp.expression, v.node.identifier.node.name);
                 }
             },
             Expression::Call(v) => {
