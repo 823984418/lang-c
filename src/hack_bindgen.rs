@@ -805,7 +805,6 @@ impl HackBindgenCallbacks {
 
     pub fn post_processing(&self, code: &mut String) {
         let inner = self.0.borrow_mut();
-        println!("{:#?}", inner.macro_define);
         let reg =
             Regex::new(r###"pub[ \r\n]+const[ \r\n]+(?P<NAME>.*)[ \r\n]*:[ \r\n]*.* =[ \r\n]*b"hack_bindgen_macro:(?P<ID>.*)\\0"[ \r\n]*;"###)
                 .unwrap();
