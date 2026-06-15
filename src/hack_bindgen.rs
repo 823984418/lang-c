@@ -20,6 +20,11 @@ use std::error::Error;
 use std::fmt::Write;
 use std::rc::Rc;
 
+#[derive(Debug, Default)]
+pub struct HackBindgenContext {
+    macro_define: HashMap<String, MacroItem>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct RustType {
     type_name: String,
@@ -62,13 +67,13 @@ impl RustType {
         }
     }
 
-    pub fn from_type_name(node: &Node<TypeName>) -> Self {
+    pub fn from_type_name(node: &Node<TypeName>, ctx: &HackBindgenContext) -> Self {
         let mut this = Self::new();
         for i in &node.node.specifiers {
             this.with_specifier_qualifier(i);
         }
         if let Some(s) = &node.node.declarator {
-            this.with_declarator(s);
+            this.with_declarator(s, ctx);
         }
         this
     }
@@ -159,7 +164,7 @@ impl RustType {
         }
     }
 
-    pub fn with_declarator(&mut self, node: &Node<Declarator>) {
+    pub fn with_declarator(&mut self, node: &Node<Declarator>, ctx: &HackBindgenContext) {
         for i in &node.node.derived {
             match &i.node {
                 DerivedDeclarator::Pointer(v) => {
@@ -186,11 +191,11 @@ impl RustType {
                             self.type_name = format!("[{}]", self.type_name)
                         }
                         ArraySize::VariableExpression(v) => {
-                            let len = RustExpression::from_node(v).expression;
+                            let len = RustExpression::from_node(v, ctx).expression;
                             self.type_name = format!("[{}; {}]", self.type_name, len);
                         }
                         ArraySize::StaticExpression(v) => {
-                            let len = RustExpression::from_node(v).expression;
+                            let len = RustExpression::from_node(v, ctx).expression;
                             self.type_name = format!("[{}; {}]", self.type_name, len);
                         }
                     }
@@ -227,11 +232,14 @@ pub struct RustExpression {
 }
 
 impl RustExpression {
-    pub fn from_node(node: &Node<Expression>) -> Self {
+    pub fn from_node(node: &Node<Expression>, ctx: &HackBindgenContext) -> Self {
         let mut type_info = None;
         let mut expression = String::new();
         match &node.node {
             Expression::Identifier(v) => {
+                if let Some(MacroItem::Expression(e)) = ctx.macro_define.get(&v.node.name) {
+                    type_info = e.type_info.clone();
+                }
                 expression = v.node.name.clone();
             }
             Expression::Constant(v) => match &v.node {
@@ -310,11 +318,11 @@ impl RustExpression {
             }
             Expression::Member(v) => match v.node.operator.node {
                 MemberOperator::Direct => {
-                    let exp = RustExpression::from_node(&v.node.expression);
+                    let exp = RustExpression::from_node(&v.node.expression, ctx);
                     expression = format!("({}).{}", exp.expression, v.node.identifier.node.name);
                 }
                 MemberOperator::Indirect => {
-                    let exp = RustExpression::from_node(&v.node.expression);
+                    let exp = RustExpression::from_node(&v.node.expression, ctx);
                     expression = format!("(*({})).{}", exp.expression, v.node.identifier.node.name);
                 }
             },
@@ -322,25 +330,26 @@ impl RustExpression {
                 let callee = if let Expression::Identifier(f) = &v.node.callee.node {
                     f.node.name.clone()
                 } else {
-                    RustExpression::from_node(&v.node.callee).expression
+                    RustExpression::from_node(&v.node.callee, ctx).expression
                 };
                 let args = v
                     .node
                     .arguments
                     .iter()
-                    .map(|i| RustExpression::from_node(i).expression)
+                    .map(|i| RustExpression::from_node(i, ctx).expression)
                     .collect::<Vec<_>>()
                     .join(", ");
                 expression = format!("{}({})", callee, args);
             }
             Expression::CompoundLiteral(v) => {
-                let ty = RustType::from_type_name(&v.node.type_name);
+                let ty = RustType::from_type_name(&v.node.type_name, ctx);
                 let mut code = String::new();
 
                 fn init_list(
                     code: &mut String,
                     pre: &str,
                     node: &Node<InitializerListItem>,
+                    ctx: &HackBindgenContext,
                     index: &mut u128,
                 ) {
                     let mut index_str = String::new();
@@ -349,7 +358,7 @@ impl RustExpression {
                     } else {
                         if let Designator::Index(e) = &node.node.designation[0].node {
                             if let Ok((_, v)) = cexpr::literal::parse(
-                                RustExpression::from_node(e).expression.as_bytes(),
+                                RustExpression::from_node(e, ctx).expression.as_bytes(),
                             ) {
                                 match v {
                                     EvalResult::Int(s) => {
@@ -371,15 +380,15 @@ impl RustExpression {
                             .iter()
                             .map(|i| match &i.node {
                                 Designator::Index(e) => {
-                                    format!("[{}]", RustExpression::from_node(e).expression)
+                                    format!("[{}]", RustExpression::from_node(e, ctx).expression)
                                 }
                                 Designator::Member(e) => {
                                     format!(".{}", e.node.name)
                                 }
                                 Designator::Range(e) => format!(
                                     "{}..{}]",
-                                    RustExpression::from_node(&e.node.from).expression,
-                                    RustExpression::from_node(&e.node.to).expression
+                                    RustExpression::from_node(&e.node.from, ctx).expression,
+                                    RustExpression::from_node(&e.node.to, ctx).expression
                                 ),
                             })
                             .collect::<Vec<_>>();
@@ -391,14 +400,14 @@ impl RustExpression {
                                 code,
                                 "v{} = {};",
                                 index_str,
-                                RustExpression::from_node(e).expression
+                                RustExpression::from_node(e, ctx).expression
                             )
                             .unwrap();
                         }
                         Initializer::List(e) => {
                             let mut i = 0;
                             for n in e {
-                                init_list(code, &format!("{}{}", pre, index_str), n, &mut i);
+                                init_list(code, &format!("{}{}", pre, index_str), n, ctx, &mut i);
                             }
                         }
                     }
@@ -406,7 +415,7 @@ impl RustExpression {
 
                 let mut index = 0;
                 for i in &v.node.initializer_list {
-                    init_list(&mut code, "v", i, &mut index);
+                    init_list(&mut code, "v", i, ctx, &mut index);
                 }
                 expression = format!(
                     "unsafe {{let mut v = core::mem::zeroed::<{}>(); {} v}}",
@@ -415,7 +424,7 @@ impl RustExpression {
                 type_info = Some(ty);
             }
             Expression::SizeOfTy(v) => {
-                let par_ty = RustType::from_type_name(&v.node.0);
+                let par_ty = RustType::from_type_name(&v.node.0, ctx);
                 expression = format!("size_of::<{}>()", par_ty.type_name);
                 type_info = Some(RustType {
                     type_name: "usize".to_string(),
@@ -423,7 +432,7 @@ impl RustExpression {
                 });
             }
             Expression::AlignOf(v) => {
-                let par_ty = RustType::from_type_name(&v.node.0);
+                let par_ty = RustType::from_type_name(&v.node.0, ctx);
                 expression = format!("align_of::<{}>()", par_ty.type_name);
                 type_info = Some(RustType {
                     type_name: "usize".to_string(),
@@ -431,7 +440,7 @@ impl RustExpression {
                 });
             }
             Expression::UnaryOperator(v) => {
-                let ops = RustExpression::from_node(&v.node.operand);
+                let ops = RustExpression::from_node(&v.node.operand, ctx);
                 type_info = ops.type_info;
                 match &v.node.operator.node {
                     UnaryOperator::PostIncrement => {
@@ -483,14 +492,14 @@ impl RustExpression {
                 }
             }
             Expression::Cast(v) => {
-                let ops = RustExpression::from_node(&v.node.expression);
-                let ty = RustType::from_type_name(&v.node.type_name);
+                let ops = RustExpression::from_node(&v.node.expression, ctx);
+                let ty = RustType::from_type_name(&v.node.type_name, ctx);
                 expression = format!("{} as {}", ops.expression, ty.type_name);
                 type_info = Some(ty);
             }
             Expression::BinaryOperator(v) => {
-                let lhs = RustExpression::from_node(&v.node.lhs);
-                let rhs = RustExpression::from_node(&v.node.rhs);
+                let lhs = RustExpression::from_node(&v.node.lhs, ctx);
+                let rhs = RustExpression::from_node(&v.node.rhs, ctx);
                 match &v.node.operator.node {
                     BinaryOperator::Index => {
                         expression = format!("({})[{}]", lhs.expression, rhs.expression);
@@ -592,24 +601,15 @@ impl RustExpression {
                         });
                     }
                     BinaryOperator::BitwiseAnd => {
-                        expression = format!(
-                            "(({}) & ({})) as core::ffi::c_int",
-                            lhs.expression, rhs.expression
-                        );
+                        expression = format!("(({}) & ({}))", lhs.expression, rhs.expression);
                         type_info = lhs.type_info.or(rhs.type_info);
                     }
                     BinaryOperator::BitwiseXor => {
-                        expression = format!(
-                            "(({}) ^ ({})) as core::ffi::c_int",
-                            lhs.expression, rhs.expression
-                        );
+                        expression = format!("(({}) ^ ({}))", lhs.expression, rhs.expression);
                         type_info = lhs.type_info.or(rhs.type_info);
                     }
                     BinaryOperator::BitwiseOr => {
-                        expression = format!(
-                            "(({}) | ({})) as core::ffi::c_int",
-                            lhs.expression, rhs.expression
-                        );
+                        expression = format!("(({}) | ({}))", lhs.expression, rhs.expression);
                         type_info = lhs.type_info.or(rhs.type_info);
                     }
                     BinaryOperator::LogicalAnd => {
@@ -712,9 +712,9 @@ impl RustExpression {
                 }
             }
             Expression::Conditional(v) => {
-                let condition = RustExpression::from_node(&v.node.condition);
-                let then_expression = RustExpression::from_node(&v.node.then_expression);
-                let else_expression = RustExpression::from_node(&v.node.else_expression);
+                let condition = RustExpression::from_node(&v.node.condition, ctx);
+                let then_expression = RustExpression::from_node(&v.node.then_expression, ctx);
+                let else_expression = RustExpression::from_node(&v.node.else_expression, ctx);
                 expression = format!(
                     "if {} {{{}}} else {{{}}}",
                     condition.expression, then_expression.expression, else_expression.expression
@@ -724,7 +724,7 @@ impl RustExpression {
             Expression::Comma(v) => {
                 let mut code = v
                     .iter()
-                    .map(|x| RustExpression::from_node(x))
+                    .map(|x| RustExpression::from_node(x, ctx))
                     .collect::<Vec<_>>();
                 type_info = code.last().map(|i| i.type_info.clone()).flatten();
                 expression = format!(
@@ -761,13 +761,8 @@ pub enum MacroItem {
     TypeName(RustType),
 }
 
-#[derive(Debug, Default)]
-struct HackBindgenCallbacksInner {
-    macro_define: HashMap<String, MacroItem>,
-}
-
 #[derive(Debug, Default, Clone)]
-pub struct HackBindgenCallbacks(Rc<RefCell<HackBindgenCallbacksInner>>);
+pub struct HackBindgenCallbacks(Rc<RefCell<HackBindgenContext>>);
 
 impl HackBindgenCallbacks {
     pub fn new() -> Self {
@@ -785,14 +780,14 @@ impl HackBindgenCallbacks {
             let mut env_exp = Env::with_clang();
             let mut env_type = Env::with_clang();
             if let Ok(v) = expression(&code, &mut env_exp) {
-                let expr = RustExpression::from_node(&v);
+                let expr = RustExpression::from_node(&v, &self.0.borrow());
                 self.0
                     .borrow_mut()
                     .macro_define
                     .insert(name.to_string(), MacroItem::Expression(expr));
                 return true;
             } else if let Ok(v) = type_name(&code, &mut env_type) {
-                let expr = RustType::from_type_name(&v);
+                let expr = RustType::from_type_name(&v, &self.0.borrow());
                 self.0
                     .borrow_mut()
                     .macro_define
@@ -808,23 +803,26 @@ impl HackBindgenCallbacks {
         let reg =
             Regex::new(r###"pub[ \r\n]+const[ \r\n]+(?P<NAME>.*)[ \r\n]*:[ \r\n]*.* =[ \r\n]*b"hack_bindgen_macro:(?P<ID>.*)\\0"[ \r\n]*;"###)
                 .unwrap();
-        *code = reg
+        let result = reg
             .replace_all(code, |x: &Captures| -> Cow<str> {
                 let id = &x["ID"];
                 let name = &x["NAME"];
                 if let Some(item) = inner.macro_define.get(id) {
                     match item {
                         MacroItem::Expression(e) => {
-                            return format!(
-                                "pub const {}: {} = {};",
-                                name,
-                                e.type_info
-                                    .as_ref()
-                                    .map(|i| i.type_name.as_str())
-                                    .unwrap_or("unknown"),
-                                e.expression
-                            )
-                            .into()
+                            if let Some(ty) = &e.type_info {
+                                return format!(
+                                    "pub const {}: {} = unsafe {{{}}};",
+                                    name, ty.type_name, e.expression
+                                )
+                                .into();
+                            } else {
+                                return format!(
+                                    "// pub const {}: unknown = unsafe {{{}}};",
+                                    name, e.expression
+                                )
+                                .into();
+                            }
                         }
                         MacroItem::TypeName(t) => {
                             return format!("pub type {} = {};", name, t.type_name).into()
@@ -834,10 +832,22 @@ impl HackBindgenCallbacks {
                 format!("// {} unknown macro define", name).into()
             })
             .to_string();
+
+        *code = result;
     }
 
     pub fn generate(mut b: bindgen::Builder) -> Result<String, Box<dyn Error>> {
         let this = Self::new();
+        b = b.raw_line("pub type uint8_t = u8;");
+        b = b.raw_line("pub type int8_t = i8;");
+        b = b.raw_line("pub type uint16_t = u16;");
+        b = b.raw_line("pub type int16_t = i16;");
+        b = b.raw_line("pub type uint32_t = u32;");
+        b = b.raw_line("pub type int32_t = i32;");
+        b = b.raw_line("pub type uint64_t = u64;");
+        b = b.raw_line("pub type int64_t = i64;");
+        b = b.raw_line("pub type uint128_t = u128;");
+        b = b.raw_line("pub type int128_t = i128;");
         b = b.parse_callbacks(Box::new(this.clone()));
         let bindings = b.generate()?;
         let mut code = Vec::<u8>::new();
