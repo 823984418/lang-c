@@ -281,6 +281,13 @@ pub struct RustExpression {
 }
 
 impl RustExpression {
+    pub fn from_str(exp: &str, ty: &str) -> Self {
+        Self {
+            expression: exp.to_string(),
+            type_info: Some(RustType::from_name(ty)),
+        }
+    }
+
     pub fn from_node(node: &Node<Expression>, ctx: &HackBindgenContext) -> Self {
         let mut type_info = None;
         let mut expression = String::new();
