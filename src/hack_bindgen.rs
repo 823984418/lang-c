@@ -462,7 +462,7 @@ impl RustExpression {
                         expression = format!("{{let p = &mut ({}); *p -= 1; *p}}", ops.expression);
                     }
                     UnaryOperator::Address => {
-                        expression = format!("&raw const ({}) as *mut _", ops.expression);
+                        expression = format!("(&raw const ({})).cast_mut()", ops.expression);
                         type_info = type_info.map(|i| RustType {
                             type_name: format!("*mut ({})", i.type_name),
                             ..RustType::new()
