@@ -63,8 +63,8 @@ impl HackBindgenContext {
 
 #[derive(Debug, Default, Clone)]
 pub struct RustType {
-    type_name: String,
-    is_array: bool,
+    pub type_name: String,
+    pub is_array: bool,
 
     // 这些修饰符用于生成过程，并不作用于最终结果
     has_const: bool,
@@ -272,8 +272,8 @@ impl RustType {
 
 #[derive(Debug, Clone)]
 pub struct RustExpression {
-    type_info: Option<RustType>,
-    expression: String,
+    pub type_info: Option<RustType>,
+    pub expression: String,
 }
 
 impl RustExpression {
