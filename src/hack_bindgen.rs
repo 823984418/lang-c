@@ -1,15 +1,16 @@
 use ast::{
     ArraySize, BinaryOperator, Constant, DeclarationSpecifier, Declarator, DerivedDeclarator,
-    Designator, Ellipsis, Expression, FloatFormat, FloatSuffix, Initializer, InitializerListItem,
-    IntegerSize, IntegerSuffix, MemberOperator, ParameterDeclaration, PointerQualifier,
-    SpecifierQualifier, TypeName, TypeQualifier, TypeSpecifier, UnaryOperator,
+    Designator, Ellipsis, Expression, FloatBase, FloatFormat, FloatSuffix, Initializer,
+    InitializerListItem, IntegerBase, IntegerSize, IntegerSuffix, MemberOperator,
+    ParameterDeclaration, PointerQualifier, SpecifierQualifier, TypeName, TypeQualifier,
+    TypeSpecifier, UnaryOperator,
 };
 use bindgen::callbacks::TokenKind;
 use bindgen::callbacks::{ParseCallbacks, Token};
 use cexpr::expr::EvalResult;
 use cexpr::literal::CChar;
 use env::Env;
-use parser::expression;
+use parser::{expression, type_name};
 use regex::{Captures, Regex};
 use span::Node;
 use std::borrow::Cow;
@@ -235,13 +236,45 @@ impl RustExpression {
             }
             Expression::Constant(v) => match &v.node {
                 Constant::Integer(v) => {
+                    let base = match &v.base {
+                        IntegerBase::Decimal => "",
+                        IntegerBase::Octal => "0",
+                        IntegerBase::Hexadecimal => "0x",
+                        IntegerBase::Binary => "0b",
+                    };
                     let ty = RustType::from_integer_suffix(&v.suffix);
-                    expression = format!("{} as {}", v.number, ty.type_name);
+                    expression = format!("{}{} as {}", base, v.number, ty.type_name);
                     type_info = Some(ty);
                 }
                 Constant::Float(v) => {
                     let ty = RustType::from_float_suffix(&v.suffix);
                     expression = format!("{} as {}", v.number, ty.type_name);
+                    if v.base == FloatBase::Hexadecimal {
+                        let f = match &v.suffix.format {
+                            FloatFormat::Float => "f",
+                            FloatFormat::Double => "",
+                            FloatFormat::LongDouble => "l",
+                            FloatFormat::TS18661Format(_) => "",
+                        };
+                        if let Ok((_, s)) = cexpr::literal::parse(
+                            format!(
+                                "{}{}{}",
+                                match v.base {
+                                    FloatBase::Decimal => "",
+                                    FloatBase::Hexadecimal => "0x",
+                                },
+                                v.number,
+                                f,
+                            )
+                            .as_bytes(),
+                        ) {
+                            if let EvalResult::Float(s) = s {
+                                expression = format!("{}{} as {}", s, f, ty.type_name);
+                            }
+                        }
+                    } else {
+                        expression = format!("{} as {}", v.number, ty.type_name);
+                    }
                     type_info = Some(ty);
                 }
                 Constant::Character(v) => {
@@ -725,6 +758,7 @@ impl RustExpression {
 #[derive(Debug)]
 pub enum MacroItem {
     Expression(RustExpression),
+    TypeName(RustType),
 }
 
 #[derive(Debug, Default)]
@@ -740,7 +774,7 @@ impl HackBindgenCallbacks {
         Self::default()
     }
 
-    pub fn define(&self, name: &str, tokens: &[Token]) {
+    pub fn define(&self, name: &str, tokens: &[Token]) -> bool {
         let code = tokens
             .iter()
             .skip(1)
@@ -748,21 +782,32 @@ impl HackBindgenCallbacks {
             .collect::<Vec<_>>()
             .join(" ");
         {
-            let mut env = Env::with_clang();
-            if let Ok(v) = expression(&code, &mut env) {
+            let mut env_exp = Env::with_clang();
+            let mut env_type = Env::with_clang();
+            if let Ok(v) = expression(&code, &mut env_exp) {
                 let expr = RustExpression::from_node(&v);
                 self.0
                     .borrow_mut()
                     .macro_define
                     .insert(name.to_string(), MacroItem::Expression(expr));
+                return true;
+            } else if let Ok(v) = type_name(&code, &mut env_type) {
+                let expr = RustType::from_type_name(&v);
+                self.0
+                    .borrow_mut()
+                    .macro_define
+                    .insert(name.to_string(), MacroItem::TypeName(expr));
+                return true;
             }
         }
+        false
     }
 
     pub fn post_processing(&self, code: &mut String) {
         let inner = self.0.borrow_mut();
+        println!("{:#?}", inner.macro_define);
         let reg =
-            Regex::new(r###"pub const (?P<NAME>.*): .* = b"hack_bindgen_macro:(?P<ID>.*)\\0";"###)
+            Regex::new(r###"pub[ \r\n]+const[ \r\n]+(?P<NAME>.*)[ \r\n]*:[ \r\n]*.* =[ \r\n]*b"hack_bindgen_macro:(?P<ID>.*)\\0"[ \r\n]*;"###)
                 .unwrap();
         *code = reg
             .replace_all(code, |x: &Captures| -> Cow<str> {
@@ -782,9 +827,12 @@ impl HackBindgenCallbacks {
                             )
                             .into()
                         }
+                        MacroItem::TypeName(t) => {
+                            return format!("pub type {} = {};", name, t.type_name).into()
+                        }
                     }
                 }
-                "<unknown macro define>".into()
+                format!("// {} unknown macro define", name).into()
             })
             .to_string();
     }
@@ -803,21 +851,23 @@ impl HackBindgenCallbacks {
 
 impl ParseCallbacks for HackBindgenCallbacks {
     fn modify_macro(&self, name: &str, tokens: &mut Vec<Token>) {
-        self.define(name, tokens);
-
-        // 替换为字符串定义以便于后处理的替换查找
-        tokens.truncate(1);
-        tokens.push(Token {
-            kind: TokenKind::Literal,
-            raw: format!(
-                "\"{}\"",
-                format!("hack_bindgen_macro:{}", name)
-                    .as_bytes()
-                    .escape_ascii()
-            )
-            .into_boxed_str()
-            .into_boxed_bytes(),
-        });
+        if tokens.len() > 1 {
+            if self.define(name, tokens) {
+                // 替换为字符串定义以便于后处理的替换查找
+                tokens.truncate(1);
+                tokens.push(Token {
+                    kind: TokenKind::Literal,
+                    raw: format!(
+                        "\"{}\"",
+                        format!("hack_bindgen_macro:{}", name)
+                            .as_bytes()
+                            .escape_ascii()
+                    )
+                    .into_boxed_str()
+                    .into_boxed_bytes(),
+                });
+            }
+        }
     }
 }
 
