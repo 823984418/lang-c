@@ -20,11 +20,27 @@ use std::error::Error;
 use std::fmt::{Debug, Formatter, Write};
 use std::rc::Rc;
 
-#[derive(Default)]
 pub struct HackBindgenContext {
     macro_define: HashMap<String, MacroItem>,
     inline_fn:
         HashMap<String, Box<dyn Fn(&[RustExpression], &HackBindgenContext) -> RustExpression>>,
+    pub env: Env,
+}
+
+impl Default for HackBindgenContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HackBindgenContext {
+    pub fn new() -> Self {
+        Self {
+            macro_define: HashMap::new(),
+            inline_fn: HashMap::new(),
+            env: Env::with_clang(),
+        }
+    }
 }
 
 impl Debug for HackBindgenContext {
@@ -807,8 +823,8 @@ impl HackBindgenCallbacks {
             .collect::<Vec<_>>()
             .join(" ");
         {
-            let mut env_exp = Env::with_clang();
-            let mut env_type = Env::with_clang();
+            let mut env_exp = self.0.borrow().env.clone();
+            let mut env_type = self.0.borrow().env.clone();
             if let Ok(v) = expression(&code, &mut env_exp) {
                 let expr = RustExpression::from_node(&v, &self.0.borrow());
                 self.0

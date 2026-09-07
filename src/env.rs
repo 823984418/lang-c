@@ -10,6 +10,7 @@ pub enum Symbol {
     Identifier,
 }
 
+#[derive(Clone, Debug)]
 pub struct Env {
     pub symbols: Vec<HashMap<String, Symbol>>,
     pub extensions_gnu: bool,
@@ -67,16 +68,12 @@ impl Env {
     }
 
     pub fn is_typename(&self, ident: &str) -> bool {
-        // Hack for bindgen macro:
-        // Always return true to allow inference of expressions involving types from unknown environments.
-        _ = ident;
-        true
-        // for scope in self.symbols.iter().rev() {
-        //     if let Some(symbol) = scope.get(ident) {
-        //         return *symbol == Symbol::Typename;
-        //     }
-        // }
-        // false
+        for scope in self.symbols.iter().rev() {
+            if let Some(symbol) = scope.get(ident) {
+                return *symbol == Symbol::Typename;
+            }
+        }
+        false
     }
 
     pub fn handle_declarator(&mut self, d: &Node<Declarator>, sym: Symbol) {
