@@ -16,6 +16,7 @@ pub struct Env {
     pub extensions_gnu: bool,
     pub extensions_clang: bool,
     pub reserved: HashSet<&'static str>,
+    pub hack_is_typename: Option<bool>,
 }
 
 impl Env {
@@ -27,6 +28,7 @@ impl Env {
             extensions_clang: false,
             symbols: vec![HashMap::default()],
             reserved: reserved,
+            hack_is_typename: None,
         }
     }
 
@@ -41,6 +43,7 @@ impl Env {
             extensions_clang: false,
             symbols: vec![symbols],
             reserved: reserved,
+            hack_is_typename: None,
         }
     }
 
@@ -56,6 +59,7 @@ impl Env {
             extensions_clang: true,
             symbols: vec![symbols],
             reserved: reserved,
+            hack_is_typename: None,
         }
     }
 
@@ -68,6 +72,9 @@ impl Env {
     }
 
     pub fn is_typename(&self, ident: &str) -> bool {
+        if let Some(v) = self.hack_is_typename {
+            return v;
+        }
         for scope in self.symbols.iter().rev() {
             if let Some(symbol) = scope.get(ident) {
                 return *symbol == Symbol::Typename;
